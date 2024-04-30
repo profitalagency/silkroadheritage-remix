@@ -65,6 +65,7 @@ yalc.lock
 /build
 /dist
 /public/build
+/studio
 
 # miniflare
 .mf
