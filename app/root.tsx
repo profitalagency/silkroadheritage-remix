@@ -1,69 +1,53 @@
+import {useNonce} from '@shopify/hydrogen';
 import {
-  isRouteErrorResponse,
+  defer,
+  type SerializeFrom,
+  type LoaderFunctionArgs,
+} from '@shopify/remix-oxygen';
+import {
   Links,
-  LiveReload,
   Meta,
   Outlet,
   Scripts,
-  ScrollRestoration,
-  useLoaderData,
+  LiveReload,
   useMatches,
   useRouteError,
+  useLoaderData,
+  ScrollRestoration,
+  isRouteErrorResponse,
+  type ShouldRevalidateFunction,
 } from '@remix-run/react';
-import {
-  Seo,
-  type SeoHandleFunction,
-  ShopifySalesChannel,
-  useNonce,
-} from '@shopify/hydrogen';
-import type {Collection, Shop} from '@shopify/hydrogen/storefront-api-types';
-import {
-  defer,
-  type LinksFunction,
-  type LoaderFunctionArgs,
-  type MetaFunction,
-  type SerializeFrom,
-} from '@shopify/remix-oxygen';
-import {getPreview, PreviewProvider} from 'hydrogen-sanity';
+import type {CustomerAccessToken} from '@shopify/hydrogen/storefront-api-types';
+import favicon from '../public/favicon.svg';
+import resetStyles from './styles/reset.css';
+import appStyles from './styles/app.css';
+import {Layout} from '~/components/Layout';
 
-import {GenericError} from '~/components/global/GenericError';
-import {Layout} from '~/components/global/Layout';
-import {NotFound} from '~/components/global/NotFound';
-import {PreviewLoading} from '~/components/global/PreviewLoading';
-import {useAnalytics} from '~/hooks/useAnalytics';
-import {DEFAULT_LOCALE} from '~/lib/utils';
-import {LAYOUT_QUERY} from '~/queries/sanity/layout';
-import {COLLECTION_QUERY_ID} from '~/queries/shopify/collection';
-import stylesheet from '~/styles/tailwind.css';
-import type {I18nLocale} from '~/types/shopify';
-import {SanityLayout} from './lib/sanity';
+/**
+ * This is important to avoid re-fetching root queries on sub-navigations
+ */
+export const shouldRevalidate: ShouldRevalidateFunction = ({
+  formMethod,
+  currentUrl,
+  nextUrl,
+}) => {
+  // revalidate when a mutation is performed e.g add to cart, login...
+  if (formMethod && formMethod !== 'GET') {
+    return true;
+  }
 
-const seo: SeoHandleFunction<typeof loader> = ({data}) => ({
-  title: data?.layout?.seo?.title,
-  titleTemplate: `%s${
-    data?.layout?.seo?.title ? ` · ${data?.layout?.seo?.title}` : ''
-  }`,
-  description: data?.layout?.seo?.description,
-});
+  // revalidate when manually revalidating via useRevalidator
+  if (currentUrl.toString() === nextUrl.toString()) {
+    return true;
+  }
 
-export const handle = {
-  seo,
+  return false;
 };
 
-export const meta: MetaFunction = () => [
-  {
-    name: 'viewport',
-    content: 'width=device-width,initial-scale=1',
-  },
-];
-
-export const links: LinksFunction = () => {
+export function links() {
   return [
-    {rel: 'stylesheet', href: stylesheet},
-    {
-      href: 'https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,500;0,700;1,500;1,700&display=swap',
-      rel: 'stylesheet',
-    },
+    {rel: 'stylesheet', href: resetStyles},
+    {rel: 'stylesheet', href: appStyles},
     {
       rel: 'preconnect',
       href: 'https://cdn.shopify.com',
@@ -72,61 +56,8 @@ export const links: LinksFunction = () => {
       rel: 'preconnect',
       href: 'https://shop.app',
     },
-    {
-      rel: 'preconnect',
-      href: 'https://fonts.gstatic.com',
-      crossOrigin: 'anonymous',
-    },
-    {
-      rel: 'preconnect',
-      href: 'https://fonts.googleapis.com',
-      crossOrigin: 'anonymous',
-    },
+    {rel: 'icon', type: 'image/svg+xml', href: favicon},
   ];
-};
-
-export async function loader({context}: LoaderFunctionArgs) {
-  const {cart} = context;
-
-  const cache = context.storefront.CacheCustom({
-    mode: 'public',
-    maxAge: 60,
-    staleWhileRevalidate: 60,
-  });
-
-  const preview = getPreview(context);
-
-  const [shop, layout] = await Promise.all([
-    context.storefront.query<{shop: Shop}>(SHOP_QUERY),
-    context.sanity.query<SanityLayout>({query: LAYOUT_QUERY, cache}),
-  ]);
-
-  const selectedLocale = context.storefront.i18n as I18nLocale;
-
-  return defer({
-    preview,
-    analytics: {
-      shopifySalesChannel: ShopifySalesChannel.hydrogen,
-      shopId: shop.shop.id,
-    },
-    cart: cart.get(),
-    layout,
-    notFoundCollection: layout?.notFoundPage?.collectionGid
-      ? context.storefront.query<{collection: Collection}>(
-          COLLECTION_QUERY_ID,
-          {
-            variables: {
-              id: layout.notFoundPage.collectionGid,
-              count: 16,
-            },
-          },
-        )
-      : undefined,
-    sanityProjectID: context.env.SANITY_PROJECT_ID,
-    sanityDataset: context.env.SANITY_DATASET,
-    selectedLocale,
-    storeDomain: context.storefront.getShopifyDomain(),
-  });
 }
 
 export const useRootLoaderData = () => {
@@ -134,91 +65,63 @@ export const useRootLoaderData = () => {
   return root?.data as SerializeFrom<typeof loader>;
 };
 
-export default function App() {
-  const {preview, ...data} = useLoaderData<SerializeFrom<typeof loader>>();
-  const locale = data.selectedLocale ?? DEFAULT_LOCALE;
-  const hasUserConsent = true;
-  const nonce = useNonce();
+export async function loader({context}: LoaderFunctionArgs) {
+  const {storefront, session, cart} = context;
+  const customerAccessToken = await session.get('customerAccessToken');
+  const publicStoreDomain = context.env.PUBLIC_STORE_DOMAIN;
 
-  useAnalytics(hasUserConsent);
+  // validate the customer access token is valid
+  const {isLoggedIn, headers} = await validateCustomerAccessToken(
+    session,
+    customerAccessToken,
+  );
 
-  return (
-    <html lang={locale.language}>
-      <head>
-        <meta charSet="utf-8" />
-        <Seo />
-        <Meta />
-        <Links />
-      </head>
-      <body>
-        <PreviewProvider previewConfig={preview} fallback={<PreviewLoading />}>
-          <Layout key={`${locale.language}-${locale.country}`}>
-            <Outlet />
-          </Layout>
-        </PreviewProvider>
-        <ScrollRestoration nonce={nonce} />
-        <Scripts nonce={nonce} />
-        <LiveReload nonce={nonce} />
-      </body>
-    </html>
+  // defer the cart query by not awaiting it
+  const cartPromise = cart.get();
+
+  // defer the footer query (below the fold)
+  const footerPromise = storefront.query(FOOTER_QUERY, {
+    cache: storefront.CacheLong(),
+    variables: {
+      footerMenuHandle: 'footer', // Adjust to your footer menu handle
+    },
+  });
+
+  // await the header query (above the fold)
+  const headerPromise = storefront.query(HEADER_QUERY, {
+    cache: storefront.CacheLong(),
+    variables: {
+      headerMenuHandle: 'main-menu', // Adjust to your header menu handle
+    },
+  });
+
+  return defer(
+    {
+      cart: cartPromise,
+      footer: footerPromise,
+      header: await headerPromise,
+      isLoggedIn,
+      publicStoreDomain,
+    },
+    {headers},
   );
 }
 
-export function ErrorBoundary({error}: {error: Error}) {
+export default function App() {
   const nonce = useNonce();
-
-  const routeError = useRouteError();
-  const isRouteError = isRouteErrorResponse(routeError);
-
-  const rootData = useRootLoaderData();
-
-  const {
-    selectedLocale: locale,
-    layout,
-    notFoundCollection,
-  } = rootData
-    ? rootData
-    : {
-        selectedLocale: DEFAULT_LOCALE,
-        layout: null,
-        notFoundCollection: undefined,
-      };
-  const {notFoundPage} = layout || {};
-
-  let title = 'Error';
-  if (isRouteError) {
-    title = 'Not found';
-  }
+  const data = useLoaderData<typeof loader>();
 
   return (
-    <html lang={locale.language}>
+    <html lang="en">
       <head>
         <meta charSet="utf-8" />
-        <title>{title}</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
         <Meta />
         <Links />
       </head>
       <body>
-        <Layout
-          key={`${locale.language}-${locale.country}`}
-          backgroundColor={notFoundPage?.colorTheme?.background}
-        >
-          {isRouteError ? (
-            <>
-              {routeError.status === 404 ? (
-                <NotFound
-                  notFoundPage={notFoundPage}
-                  notFoundCollection={notFoundCollection}
-                />
-              ) : (
-                <GenericError
-                  error={{message: `${routeError.status} ${routeError.data}`}}
-                />
-              )}
-            </>
-          ) : (
-            <GenericError error={error instanceof Error ? error : undefined} />
-          )}
+        <Layout {...data}>
+          <Outlet />
         </Layout>
         <ScrollRestoration nonce={nonce} />
         <Scripts nonce={nonce} />
@@ -228,12 +131,150 @@ export function ErrorBoundary({error}: {error: Error}) {
   );
 }
 
-const SHOP_QUERY = `#graphql
-  query layout {
-    shop {
-      id
-      name
-      description
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const rootData = useRootLoaderData();
+  const nonce = useNonce();
+  let errorMessage = 'Unknown error';
+  let errorStatus = 500;
+
+  if (isRouteErrorResponse(error)) {
+    errorMessage = error?.data?.message ?? error.data;
+    errorStatus = error.status;
+  } else if (error instanceof Error) {
+    errorMessage = error.message;
+  }
+
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <Meta />
+        <Links />
+      </head>
+      <body>
+        <Layout {...rootData}>
+          <div className="route-error">
+            <h1>Oops</h1>
+            <h2>{errorStatus}</h2>
+            {errorMessage && (
+              <fieldset>
+                <pre>{errorMessage}</pre>
+              </fieldset>
+            )}
+          </div>
+        </Layout>
+        <ScrollRestoration nonce={nonce} />
+        <Scripts nonce={nonce} />
+        <LiveReload nonce={nonce} />
+      </body>
+    </html>
+  );
+}
+
+/**
+ * Validates the customer access token and returns a boolean and headers
+ * @see https://shopify.dev/docs/api/storefront/latest/objects/CustomerAccessToken
+ *
+ * @example
+ * ```js
+ * const {isLoggedIn, headers} = await validateCustomerAccessToken(
+ *  customerAccessToken,
+ *  session,
+ * );
+ * ```
+ */
+async function validateCustomerAccessToken(
+  session: LoaderFunctionArgs['context']['session'],
+  customerAccessToken?: CustomerAccessToken,
+) {
+  let isLoggedIn = false;
+  const headers = new Headers();
+  if (!customerAccessToken?.accessToken || !customerAccessToken?.expiresAt) {
+    return {isLoggedIn, headers};
+  }
+
+  const expiresAt = new Date(customerAccessToken.expiresAt).getTime();
+  const dateNow = Date.now();
+  const customerAccessTokenExpired = expiresAt < dateNow;
+
+  if (customerAccessTokenExpired) {
+    session.unset('customerAccessToken');
+    headers.append('Set-Cookie', await session.commit());
+  } else {
+    isLoggedIn = true;
+  }
+
+  return {isLoggedIn, headers};
+}
+
+const MENU_FRAGMENT = `#graphql
+  fragment MenuItem on MenuItem {
+    id
+    resourceId
+    tags
+    title
+    type
+    url
+  }
+  fragment ChildMenuItem on MenuItem {
+    ...MenuItem
+  }
+  fragment ParentMenuItem on MenuItem {
+    ...MenuItem
+    items {
+      ...ChildMenuItem
     }
   }
-`;
+  fragment Menu on Menu {
+    id
+    items {
+      ...ParentMenuItem
+    }
+  }
+` as const;
+
+const HEADER_QUERY = `#graphql
+  fragment Shop on Shop {
+    id
+    name
+    description
+    primaryDomain {
+      url
+    }
+    brand {
+      logo {
+        image {
+          url
+        }
+      }
+    }
+  }
+  query Header(
+    $country: CountryCode
+    $headerMenuHandle: String!
+    $language: LanguageCode
+  ) @inContext(language: $language, country: $country) {
+    shop {
+      ...Shop
+    }
+    menu(handle: $headerMenuHandle) {
+      ...Menu
+    }
+  }
+  ${MENU_FRAGMENT}
+` as const;
+
+const FOOTER_QUERY = `#graphql
+  query Footer(
+    $country: CountryCode
+    $footerMenuHandle: String!
+    $language: LanguageCode
+  ) @inContext(language: $language, country: $country) {
+    menu(handle: $footerMenuHandle) {
+      ...Menu
+    }
+  }
+  ${MENU_FRAGMENT}
+` as const;
